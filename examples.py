@@ -16,7 +16,7 @@ m3 = MassFunction()
 m3['bc'] = 0.8
 m3[{}] = 0.2
 print('m_3 =', m3, ('(unnormalized mass function)'))
-
+m2.discount(0.8)
 print('\n=== belief, plausibility, and commonality ===')
 print('bel_1({a, b}) =', m1.bel({'a', 'b'}))
 print('pl_1({a, b}) =', m1.pl({'a', 'b'}))

@@ -6,7 +6,7 @@ from __future__ import print_function
 from itertools import chain, combinations
 from functools import partial, reduce
 from operator import mul
-from math import log, fsum, sqrt
+from math import log, fsum, sqrt, factorial
 from random import random, shuffle, uniform
 import sys
 
@@ -382,7 +382,17 @@ class MassFunction(dict):
             m_simple = MassFunction({theta:w, h:1.0 - w})
             m = m.combine_conjunctive(m_simple, normalization=False)
         return m
-    
+    def combine_conjunctive_disjunctive(self, mass_function, sample_count= None):
+        """Dubois-Prade combination; conjunctive for non-conflicting sets, disjunctive otherwise"""
+        return self._combine(mass_function, rule=lambda s1, s2: s1 | s2 if not (s1 & s2) else s1 & s2, normalization=False, sample_count=sample_count, importance_sampling=False)
+
+    def combine_yager(self, mass_function, sample_count=None, importance_sampling=False):
+        mj =  self._combine(mass_function, rule=lambda s1, s2: s1 & s2, normalization=False, sample_count=sample_count, importance_sampling=importance_sampling)
+        if frozenset() in mj:
+            mj[mj.frame()] += mj[frozenset()]
+            del mj[frozenset()]
+        return mj
+
     def _combine(self, mass_function, rule, normalization, sample_count, importance_sampling):
         """Helper method for combining two or more mass functions."""
         combined = self
@@ -498,13 +508,13 @@ class MassFunction(dict):
         m = MassFunction({MassFunction._convert(hypothesis):1.0})
         return self.combine_conjunctive(m, normalization=normalization)
     
-    def conflict(self, mass_function, sample_count=None):
+    def conflict(self, mass_function, logval=True, sample_count=None):
         """
         Calculates the weight of conflict between two or more mass functions.
         
         If 'mass_function' is not of type MassFunction, it is assumed to be an iterable containing multiple mass functions.
         
-        The weight of conflict is computed as the (natural) logarithm of the normalization constant in Dempster's rule of combination.
+        The weight of conflict is computed as the (natural) logarithm of the normalization constant in Dempster's rule of combination or as that constant itself if logval==false.
         Returns infinity in case the mass functions are flatly contradicting.
         """
         # compute full conjunctive combination (could be more efficient)
@@ -515,7 +525,10 @@ class MassFunction(dict):
         if diff == 0.0:
             return float('inf')
         else:
-            return -log(diff)
+            if logval is True:
+                return -log(diff)
+            else:
+                return 1- diff
     
     def normalize(self):
         """
@@ -531,7 +544,16 @@ class MassFunction(dict):
             for (h, v) in self.items():
                 self[h] = v / mass_sum
         return self
-    
+
+    def discount(self, r):
+        """
+        Discounts the mass function by factor r. The method returns 'self'
+        """
+        mass_omega = self[self.frame()]
+        for (h, v) in self.items():
+            self[h] = v * r
+        self[self.frame()] = 1 - (r * (1-mass_omega))
+        return self
     def prune(self):
         """
         Removes all non-focal (0 mass) hypotheses in-place.
@@ -637,7 +659,7 @@ class MassFunction(dict):
             if v > 0.0:
                 c += v * log(len(h) / v, 2)
         return c
-    
+
     def hartley_measure(self):
         """
         Computes the Hartley-like measure in order to quantify the amount of imprecision.
@@ -659,7 +681,23 @@ class MassFunction(dict):
             if h not in self:
                 d += v**p
         return d**(1.0 / p)
-    
+    def distance(self, m):
+        """
+        Computes the Jaccard-based distance between the two mass functions
+        """
+        #need to gather all keys
+        keys = numpy.array(list(set(self.keys()).union(set(m.keys()))))
+        ands = keys[:,None] & keys
+        ors = keys[:,None] | keys
+        def jac(a, b):
+            return len(a) / len(b)
+        vfunc = numpy.vectorize(jac)
+        jaccard = vfunc(ands, ors)
+        av = numpy.array( [self[k] for k in keys] )
+        bv = numpy.array([m[k] for k in keys] )
+        diff = av - bv
+        return (numpy.dot(numpy.dot(diff, jaccard), diff)*0.5)**0.5
+
     def is_compatible(self, m):
         """
         Checks whether another mass function is compatible with this one.
@@ -722,7 +760,86 @@ class MassFunction(dict):
         if not as_dict:
             shuffle(samples)
         return samples
-    
+    def contour_consistency(self):
+        """"
+        Contour consistency
+        """
+        return self.pl(self.max_pl())
+
+    def contour_conflict(self):
+        return 1-self.contour_consistency()
+
+
+    def shapley(self, masses, normalization, f, *args ):
+        masses_pset = chain.from_iterable(combinations(masses, r) for r in range(len(masses)+1))
+        sum = 0
+        mv = MassFunction([(self.frame(), 1)])
+        for coalition in masses_pset:
+            factor = factorial(len(coalition)) * factorial(len(masses) - len(coalition)) / factorial(len(masses) +1)
+            if coalition:
+                m0 = mv.combine_conjunctive(coalition, normalization)
+                m1 = self.combine_conjunctive(coalition, normalization)
+            else:
+                m0 = mv
+                m1 = self
+            args0 = (m0,) + args
+            args1 = (m1,) + args
+            sum += factor * (f(*args1) - f(*args0))
+        return sum
+
+    def shapley_yager(self, masses, f, *args ):
+        masses_pset = chain.from_iterable(combinations(masses, r) for r in range(len(masses)+1))
+        sum = 0
+        mv = MassFunction([(self.frame(), 1)])
+        for coalition in masses_pset:
+            factor = factorial(len(coalition)) * factorial(len(masses) - len(coalition)) / factorial(len(masses) +1)
+            if coalition:
+                m0 = mv.combine_yager(coalition)
+                m1 = self.combine_yager(coalition)
+            else:
+                m0 = mv
+                m1 = self
+            args0 = (m0,) + args
+            args1 = (m1,) + args
+            sum += factor * (f(*args1) - f(*args0))
+        return sum
+
+    def shapley_conj_disj(self, masses, f, *args ):
+        masses_pset = chain.from_iterable(combinations(masses, r) for r in range(len(masses)+1))
+        sum = 0
+        mv = MassFunction([(self.frame(), 1)])
+        for coalition in masses_pset:
+            factor = factorial(len(coalition)) * factorial(len(masses) - len(coalition)) / factorial(len(masses) +1)
+            if coalition:
+                m0 = mv.combine_conjunctive_disjunctive(coalition)
+                m1 = self.combine_conjunctive_disjunctive(coalition)
+            else:
+                m0 = mv
+                m1 = self
+            args0 = (m0,) + args
+            args1 = (m1,) + args
+            sum += factor * (f(*args1) - f(*args0))
+        return sum
+
+    def shapley_disj(self, masses, f, *args ):
+        masses_pset = chain.from_iterable(combinations(masses, r) for r in range(len(masses)+1))
+        sum = 0
+        mv = MassFunction([(self.frame(), 1)])
+        for coalition in masses_pset:
+            factor = factorial(len(coalition)) * factorial(len(masses) - len(coalition)) / factorial(len(masses) +1)
+            if coalition:
+                if len(coalition)>1:
+                    m0 = coalition[0].combine_conjunctive_disjunctive(coalition[1:])
+                else:
+                    m0 = coalition[0]
+                m1 = self.combine_disjunctive(coalition)
+            else:
+                m0 = mv
+                m1 = self
+            args0 = (m0,) + args
+            args1 = (m1,) + args
+            sum += factor * (f(*args1) - f(*args0))
+        return sum
     def is_probabilistic(self):
         """
         Checks whether the mass function is a probability function.
